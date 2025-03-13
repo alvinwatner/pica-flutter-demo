@@ -43,6 +43,9 @@ class _ChatInterfaceState extends State<ChatInterface> {
   Map<String, dynamic>? _currentToolResult;
   bool _isStreaming = false;
 
+  // Buffer for accumulating SSE chunks
+  String _bufferChunk = '';
+
   @override
   void dispose() {
     _textController.dispose();
@@ -92,7 +95,7 @@ class _ChatInterfaceState extends State<ChatInterface> {
     try {
       final request = http.Request(
         'POST',
-        Uri.parse('http://localhost:3000/api/chat'),
+        Uri.parse('http://127.0.0.1:8000/hey-steve/chat/pica-stream'),
       );
 
       request.headers.addAll({
@@ -100,14 +103,9 @@ class _ChatInterfaceState extends State<ChatInterface> {
         'Authorization': 'Bearer ${widget.authToken}',
       });
 
-      // Format the request to match Next.js API expectations
+      // Format the request to match API expectations
       request.body = jsonEncode({
-        'messages': [
-          {
-            'role': 'user',
-            'content': message,
-          },
-        ],
+        "message": message // Use the actual user message
       });
 
       debugPrint('Sending request to: ${request.url}');
@@ -125,14 +123,38 @@ class _ChatInterfaceState extends State<ChatInterface> {
 
         final stream = response.stream.transform(utf8.decoder);
 
+        // Reset buffer before processing new stream
+        _bufferChunk = '';
+
+        // Process the stream
         await for (var chunk in stream) {
           debugPrint('Received chunk: $chunk');
 
-          // Process the chunk line by line
-          final lines = chunk.split('\n');
-          for (var line in lines) {
-            if (line.isEmpty) continue;
-            await _processNextJsChunk(line);
+          // Append chunk to buffer
+          _bufferChunk += chunk;
+
+          // Process complete lines (each SSE message is a line starting with "data: ")
+          while (_bufferChunk.contains('\n\n')) {
+            final parts = _bufferChunk.split('\n\n');
+            final completeLine = parts[0]; // Get the complete line
+            _bufferChunk =
+                parts.sublist(1).join('\n\n'); // Keep the rest in buffer
+
+            // Process the line if it starts with "data: "
+            if (completeLine.startsWith('data: ')) {
+              final dataContent =
+                  completeLine.substring(6); // Remove "data: " prefix
+              await _processStreamChunk(dataContent);
+            }
+          }
+
+          // Handle special case for the last [DONE] message
+          if (_bufferChunk == 'data: [DONE]') {
+            setState(() {
+              _isStreaming = false;
+              _isLoading = false;
+            });
+            _bufferChunk = '';
           }
         }
 
@@ -165,8 +187,18 @@ class _ChatInterfaceState extends State<ChatInterface> {
     _scrollToBottom();
   }
 
-  Future<void> _processNextJsChunk(String line) async {
+  Future<void> _processStreamChunk(String line) async {
     try {
+      // Check for the end of stream marker
+      if (line == "[DONE]") {
+        setState(() {
+          _isStreaming = false;
+          _isLoading = false;
+        });
+        return;
+      }
+
+      // Make sure we have a valid format (letter followed by colon)
       if (line.length < 2 || line[1] != ':') {
         debugPrint('Invalid format: $line');
         return;
@@ -180,7 +212,31 @@ class _ChatInterfaceState extends State<ChatInterface> {
           try {
             final parsed = jsonDecode(data);
             setState(() {
+              // Store the previous message ID in case we need it
+              final String? prevMessageId = _currentMessageId;
               _currentMessageId = parsed['messageId'];
+
+              // If this is a new message ID and we have content,
+              // we should consider starting a new message
+              if (prevMessageId != null &&
+                  prevMessageId != _currentMessageId &&
+                  _currentAssistantMessage.isNotEmpty) {
+                // Update the last message with current content
+                if (_messages.isNotEmpty && !_messages.last.isUser) {
+                  _messages[_messages.length - 1] = ChatMessage(
+                    text: _currentAssistantMessage,
+                    isUser: false,
+                    messageId: prevMessageId,
+                    toolCall: _currentToolCall,
+                    toolResult: _currentToolResult,
+                  );
+                }
+
+                // Reset state for new message
+                _currentAssistantMessage = '';
+                _currentToolCall = null;
+                _currentToolResult = null;
+              }
 
               // Update the message with the new message ID
               if (_messages.isNotEmpty && !_messages.last.isUser) {
@@ -201,7 +257,15 @@ class _ChatInterfaceState extends State<ChatInterface> {
         case '9': // Tool Call
           try {
             final parsed = jsonDecode(data);
-            await _updateToolCall(parsed);
+            // Make sure we have a valid toolCall even if structure varies
+            Map<String, dynamic> toolCallData = parsed;
+
+            // Set defaults for missing fields if necessary
+            if (!toolCallData.containsKey('toolName')) {
+              toolCallData['toolName'] = 'unknown';
+            }
+
+            await _updateToolCall(toolCallData);
           } catch (e) {
             debugPrint('Error parsing tool call: $e');
           }
@@ -219,27 +283,38 @@ class _ChatInterfaceState extends State<ChatInterface> {
         case '0': // Text content - this is what we need for streaming
           // Clean the text content
           if (data.isNotEmpty) {
-            // If the data is wrapped in quotes like "text", remove them
-            if (data.startsWith('"') &&
-                data.endsWith('"') &&
-                data.length >= 2) {
-              data = data.substring(1, data.length - 1);
+            try {
+              // Different approach to handle the text tokens
+              String cleanedText = data;
+
+              // If it's in quotes but not valid JSON, just strip the quotes
+              if (data.startsWith('"') &&
+                  data.endsWith('"') &&
+                  data.length >= 2) {
+                cleanedText = data.substring(1, data.length - 1);
+                // No additional JSON parsing, which was causing errors
+              }
+
+              // Unescape common escape sequences
+              cleanedText = cleanedText
+                  .replaceAll('\\"', '"')
+                  .replaceAll('\\n', '\n')
+                  .replaceAll('\\r', '\r')
+                  .replaceAll('\\\\', '\\');
+
+              debugPrint('Processed text chunk: "$cleanedText"');
+
+              // Update the message with this chunk
+              await _updateAssistantMessage(cleanedText);
+
+              // Force UI update
+              setState(() {});
+            } catch (e) {
+              debugPrint(
+                  'Error processing text content: $e - will use raw data');
+              // Still try to use the raw data even if parsing failed
+              await _updateAssistantMessage(data);
             }
-
-            // Unescape any escaped quotes or other characters
-            data = data
-                .replaceAll('\\"', '"')
-                .replaceAll('\\n', '\n')
-                .replaceAll('\\r', '\r')
-                .replaceAll('\\\\', '\\');
-
-            debugPrint('Processed text chunk: "$data"');
-
-            // Update the message with this chunk
-            await _updateAssistantMessage(data);
-
-            // Force UI update
-            setState(() {});
           }
           break;
 
@@ -247,6 +322,13 @@ class _ChatInterfaceState extends State<ChatInterface> {
           try {
             final parsed = jsonDecode(data);
             debugPrint('End of message: ${parsed['finishReason']}');
+
+            // If we have isContinued: false, we know the current message is complete
+            if (parsed.containsKey('isContinued') &&
+                parsed['isContinued'] == false) {
+              // We may need to start a new message after this
+              // But we'll wait for the next 'f' message to do that
+            }
           } catch (e) {
             debugPrint('Error parsing end of message: $e');
           }
@@ -301,7 +383,7 @@ class _ChatInterfaceState extends State<ChatInterface> {
       completer.complete();
     });
 
-    // Let's also call scroll to bottom here
+    // Call scroll to bottom here to update UI as text comes in
     _scrollToBottom();
 
     return completer.future;
@@ -334,12 +416,107 @@ class _ChatInterfaceState extends State<ChatInterface> {
     return completer.future;
   }
 
+// Better tool result display
+  Widget _buildToolResultDisplay(Map<String, dynamic>? toolResult) {
+    if (toolResult == null) return Container();
+
+    // Extract result data, handling different structure possibilities
+    bool isSuccess = _getToolResultSuccessful(toolResult);
+    String content =
+        _getToolResultContent(toolResult) ?? 'No details available';
+
+    return Container(
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: isSuccess ? Colors.green[50] : Colors.red[50],
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+            color: isSuccess ? Colors.green[200]! : Colors.red[200]!),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Result: ${isSuccess ? 'Success' : 'Failed'}',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 14,
+              color: isSuccess ? Colors.green[700] : Colors.red[700],
+            ),
+          ),
+          if (content.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              content,
+              style: const TextStyle(fontSize: 12),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+// Improved tool result handling
   Future<void> _updateToolResult(Map<String, dynamic> toolResult) async {
     // Use a Completer to make this function awaitable
     final completer = Completer<void>();
 
     setState(() {
       _currentToolResult = toolResult;
+
+      // Create a normalized version of the tool result
+      Map<String, dynamic> normalizedResult = {};
+
+      // Extract success status regardless of where it is in the structure
+      bool isSuccess = false;
+      String? content;
+
+      if (toolResult.containsKey('result')) {
+        // Handle string result that needs parsing
+        if (toolResult['result'] is String) {
+          try {
+            Map<String, dynamic> parsedResult =
+                jsonDecode(toolResult['result']);
+            isSuccess = parsedResult['success'] == true;
+            content = parsedResult['content']?.toString();
+            normalizedResult = {
+              'success': isSuccess,
+              'content': content,
+              'rawResult': parsedResult
+            };
+          } catch (e) {
+            debugPrint('Error parsing result string: $e');
+            isSuccess = false;
+            normalizedResult = {
+              'success': false,
+              'content': 'Error parsing result',
+              'rawResult': toolResult['result']
+            };
+          }
+        }
+        // Handle object result
+        else if (toolResult['result'] is Map<String, dynamic>) {
+          Map<String, dynamic> resultObj = toolResult['result'];
+          isSuccess = resultObj['success'] == true;
+          content = resultObj['content']?.toString();
+          normalizedResult = {
+            'success': isSuccess,
+            'content': content,
+            'rawResult': resultObj
+          };
+        }
+      } else {
+        // Direct structure
+        isSuccess = toolResult['success'] == true;
+        content = toolResult['content']?.toString();
+        normalizedResult = {
+          'success': isSuccess,
+          'content': content,
+          'rawResult': toolResult
+        };
+      }
+
+      _currentToolResult = normalizedResult;
 
       // Update the last message if it's from the assistant
       if (_messages.isNotEmpty && !_messages.last.isUser) {
@@ -554,7 +731,7 @@ class _ChatInterfaceState extends State<ChatInterface> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'Tool: ${message.toolCall!['toolName']}',
+                            'Tool: ${message.toolCall!['toolName'] ?? 'unknown'}',
                             style: const TextStyle(
                               fontWeight: FontWeight.bold,
                               fontSize: 14,
@@ -562,7 +739,7 @@ class _ChatInterfaceState extends State<ChatInterface> {
                           ),
                           const SizedBox(height: 4),
                           Text(
-                            'Args: ${jsonEncode(message.toolCall!['args'])}',
+                            'Args: ${jsonEncode(message.toolCall!['args'] ?? {})}',
                             style: const TextStyle(
                               fontSize: 12,
                               fontFamily: 'monospace',
@@ -574,39 +751,7 @@ class _ChatInterfaceState extends State<ChatInterface> {
                   ],
                   if (message.toolResult != null) ...[
                     const SizedBox(height: 8),
-                    Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: Colors.green[50],
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: Colors.green[200]!),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Result: ${message.toolResult!['result']?['success'] == true ? 'Success' : 'Failed'}',
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 14,
-                              color: message.toolResult!['result']
-                                          ?['success'] ==
-                                      true
-                                  ? Colors.green[700]
-                                  : Colors.red[700],
-                            ),
-                          ),
-                          if (message.toolResult!['result']?['content'] !=
-                              null) ...[
-                            const SizedBox(height: 4),
-                            Text(
-                              '${message.toolResult!['result']['content']}',
-                              style: const TextStyle(fontSize: 12),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
+                    _buildToolResultDisplay(message.toolResult),
                   ],
                 ],
               ),
@@ -621,6 +766,71 @@ class _ChatInterfaceState extends State<ChatInterface> {
         ],
       ),
     );
+  }
+
+  // Helper methods for better error handling of tool results
+  String _getToolResultStatus(Map<String, dynamic>? toolResult) {
+    if (toolResult == null) return 'Unknown';
+
+    try {
+      // Handle different result structures
+      if (toolResult.containsKey('result')) {
+        final result = toolResult['result'];
+        if (result is Map<String, dynamic> && result.containsKey('success')) {
+          return result['success'] == true ? 'Success' : 'Failed';
+        }
+      }
+
+      // Fallback if structure is different
+      return toolResult.containsKey('success') && toolResult['success'] == true
+          ? 'Success'
+          : 'Failed';
+    } catch (e) {
+      debugPrint('Error getting tool result status: $e');
+      return 'Unknown';
+    }
+  }
+
+  bool _getToolResultSuccessful(Map<String, dynamic>? toolResult) {
+    if (toolResult == null) return false;
+
+    try {
+      // Handle different result structures
+      if (toolResult.containsKey('result')) {
+        final result = toolResult['result'];
+        if (result is Map<String, dynamic> && result.containsKey('success')) {
+          return result['success'] == true;
+        }
+      }
+
+      // Fallback if structure is different
+      return toolResult.containsKey('success') && toolResult['success'] == true;
+    } catch (e) {
+      debugPrint('Error checking if tool result successful: $e');
+      return false;
+    }
+  }
+
+  String? _getToolResultContent(Map<String, dynamic>? toolResult) {
+    if (toolResult == null) return null;
+
+    try {
+      // Handle different result structures
+      if (toolResult.containsKey('result')) {
+        final result = toolResult['result'];
+        if (result is Map<String, dynamic> && result.containsKey('content')) {
+          return result['content']?.toString();
+        }
+      }
+
+      // Fallback if structure is different
+      return toolResult.containsKey('content')
+          ? toolResult['content']?.toString()
+          : null;
+    } catch (e) {
+      debugPrint('Error getting tool result content: $e');
+      return null;
+    }
   }
 
   Widget _buildInputArea() {
