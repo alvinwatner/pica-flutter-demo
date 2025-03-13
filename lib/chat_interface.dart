@@ -92,7 +92,7 @@ class _ChatInterfaceState extends State<ChatInterface> {
     try {
       final request = http.Request(
         'POST',
-        Uri.parse('http://localhost:3000/api/chat'),
+        Uri.parse('http://127.0.0.1:8000/hey-steve/chat'),
       );
 
       request.headers.addAll({
@@ -100,14 +100,10 @@ class _ChatInterfaceState extends State<ChatInterface> {
         'Authorization': 'Bearer ${widget.authToken}',
       });
 
-      // Format the request to match Next.js API expectations
+      // Format the request to match the FastAPI endpoint expectations
       request.body = jsonEncode({
-        'messages': [
-          {
-            'role': 'user',
-            'content': message,
-          },
-        ],
+        'message': message,
+        'conversation_id': null, // Optional in the schema
       });
 
       debugPrint('Sending request to: ${request.url}');
@@ -123,16 +119,19 @@ class _ChatInterfaceState extends State<ChatInterface> {
               'Failed to send message: ${response.statusCode} - $errorBody');
         }
 
+        // Process the plain text stream directly
         final stream = response.stream.transform(utf8.decoder);
 
         await for (var chunk in stream) {
           debugPrint('Received chunk: $chunk');
 
-          // Process the chunk line by line
-          final lines = chunk.split('\n');
-          for (var line in lines) {
-            if (line.isEmpty) continue;
-            await _processNextJsChunk(line);
+          // Simply update the message with each chunk as it arrives
+          if (chunk.isNotEmpty) {
+            await _updateAssistantMessage(chunk);
+
+            // Force UI update and scroll
+            setState(() {});
+            _scrollToBottom();
           }
         }
 
@@ -165,119 +164,6 @@ class _ChatInterfaceState extends State<ChatInterface> {
     _scrollToBottom();
   }
 
-  Future<void> _processNextJsChunk(String line) async {
-    try {
-      if (line.length < 2 || line[1] != ':') {
-        debugPrint('Invalid format: $line');
-        return;
-      }
-
-      final eventType = line[0];
-      String data = line.substring(2);
-
-      switch (eventType) {
-        case 'f': // Message ID
-          try {
-            final parsed = jsonDecode(data);
-            setState(() {
-              _currentMessageId = parsed['messageId'];
-
-              // Update the message with the new message ID
-              if (_messages.isNotEmpty && !_messages.last.isUser) {
-                _messages[_messages.length - 1] = ChatMessage(
-                  text: _currentAssistantMessage,
-                  isUser: false,
-                  messageId: _currentMessageId,
-                  toolCall: _currentToolCall,
-                  toolResult: _currentToolResult,
-                );
-              }
-            });
-          } catch (e) {
-            debugPrint('Error parsing message ID: $e');
-          }
-          break;
-
-        case '9': // Tool Call
-          try {
-            final parsed = jsonDecode(data);
-            await _updateToolCall(parsed);
-          } catch (e) {
-            debugPrint('Error parsing tool call: $e');
-          }
-          break;
-
-        case 'a': // Tool Result
-          try {
-            final parsed = jsonDecode(data);
-            await _updateToolResult(parsed);
-          } catch (e) {
-            debugPrint('Error parsing tool result: $e');
-          }
-          break;
-
-        case '0': // Text content - this is what we need for streaming
-          // Clean the text content
-          if (data.isNotEmpty) {
-            // If the data is wrapped in quotes like "text", remove them
-            if (data.startsWith('"') &&
-                data.endsWith('"') &&
-                data.length >= 2) {
-              data = data.substring(1, data.length - 1);
-            }
-
-            // Unescape any escaped quotes or other characters
-            data = data
-                .replaceAll('\\"', '"')
-                .replaceAll('\\n', '\n')
-                .replaceAll('\\r', '\r')
-                .replaceAll('\\\\', '\\');
-
-            debugPrint('Processed text chunk: "$data"');
-
-            // Update the message with this chunk
-            await _updateAssistantMessage(data);
-
-            // Force UI update
-            setState(() {});
-          }
-          break;
-
-        case 'e': // End of message
-          try {
-            final parsed = jsonDecode(data);
-            debugPrint('End of message: ${parsed['finishReason']}');
-          } catch (e) {
-            debugPrint('Error parsing end of message: $e');
-          }
-          break;
-
-        case 'd': // End of conversation
-          try {
-            final parsed = jsonDecode(data);
-            debugPrint('End of conversation: ${parsed['finishReason']}');
-
-            // Mark streaming as complete
-            setState(() {
-              _isStreaming = false;
-              _isLoading = false;
-            });
-          } catch (e) {
-            debugPrint('Error parsing end of conversation: $e');
-          }
-          break;
-
-        default:
-          debugPrint('Unknown event type: $eventType');
-      }
-
-      // After processing each line, scroll to bottom to ensure visibility
-      _scrollToBottom();
-    } catch (e) {
-      debugPrint('Error processing chunk: $e');
-    }
-  }
-
   Future<void> _updateAssistantMessage(String content) async {
     if (content.isEmpty) return;
 
@@ -302,60 +188,6 @@ class _ChatInterfaceState extends State<ChatInterface> {
     });
 
     // Let's also call scroll to bottom here
-    _scrollToBottom();
-
-    return completer.future;
-  }
-
-  Future<void> _updateToolCall(Map<String, dynamic> toolCall) async {
-    // Use a Completer to make this function awaitable
-    final completer = Completer<void>();
-
-    setState(() {
-      _currentToolCall = toolCall;
-
-      // Update the last message if it's from the assistant
-      if (_messages.isNotEmpty && !_messages.last.isUser) {
-        _messages[_messages.length - 1] = ChatMessage(
-          text: _currentAssistantMessage,
-          isUser: false,
-          messageId: _currentMessageId,
-          toolCall: _currentToolCall,
-          toolResult: _currentToolResult,
-        );
-      }
-
-      completer.complete();
-    });
-
-    // Scroll to show the tool call
-    _scrollToBottom();
-
-    return completer.future;
-  }
-
-  Future<void> _updateToolResult(Map<String, dynamic> toolResult) async {
-    // Use a Completer to make this function awaitable
-    final completer = Completer<void>();
-
-    setState(() {
-      _currentToolResult = toolResult;
-
-      // Update the last message if it's from the assistant
-      if (_messages.isNotEmpty && !_messages.last.isUser) {
-        _messages[_messages.length - 1] = ChatMessage(
-          text: _currentAssistantMessage,
-          isUser: false,
-          messageId: _currentMessageId,
-          toolCall: _currentToolCall,
-          toolResult: _currentToolResult,
-        );
-      }
-
-      completer.complete();
-    });
-
-    // Scroll to show the tool result
     _scrollToBottom();
 
     return completer.future;
