@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:pica_oauth_client/authkit_dialog.dart';
 import 'package:pica_oauth_client/chat_interface.dart';
-import 'package:pica_oauth_client/pica_streaming_chat.dart';
 
 void main() {
   runApp(const MyApp());
@@ -43,6 +42,7 @@ class _MyHomePageState extends State<MyHomePage> {
     final result = await showDialog(
       context: context,
       builder: (context) => AuthKitDialog(
+        previewUrl: 'http://localhost:3000',
         onAuthSuccess: (authData) {
           debugPrint("Auth Success: $authData");
         },
@@ -63,7 +63,7 @@ class _MyHomePageState extends State<MyHomePage> {
       MaterialPageRoute(
         builder: (context) => const ChatInterface(
           authToken:
-              'eyJhbGciOiJSUzI1NiIsImtpZCI6ImEwODA2N2Q4M2YwY2Y5YzcxNjQyNjUwYzUyMWQ0ZWZhNWI2YTNlMDkiLCJ0eXAiOiJKV1QifQ.eyJuYW1lIjoiQWx2aW4gU2V0aWFkaSIsInBpY3R1cmUiOiJodHRwczovL2xoMy5nb29nbGV1c2VyY29udGVudC5jb20vYS9BQ2c4b2NJU1FRQk1wRmtpWk04RmtPejVUMmxrSTJ1eU0wRUcxUkp6U0c0NkRqLXF5ZHI1TFE9czk2LWMiLCJpc3MiOiJodHRwczovL3NlY3VyZXRva2VuLmdvb2dsZS5jb20vc3RldmUtZGV2LTQxZDAxIiwiYXVkIjoic3RldmUtZGV2LTQxZDAxIiwiYXV0aF90aW1lIjoxNzQxODczNDUxLCJ1c2VyX2lkIjoiNjcxYjY5MWEyYTdkOGI4YjFlNzY2MzU3Iiwic3ViIjoiNjcxYjY5MWEyYTdkOGI4YjFlNzY2MzU3IiwiaWF0IjoxNzQxODczNDUxLCJleHAiOjE3NDE4NzcwNTEsImVtYWlsIjoiYWx2aW5Ad2FsdHVybi5jb20iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiZmlyZWJhc2UiOnsiaWRlbnRpdGllcyI6eyJlbWFpbCI6WyJhbHZpbkB3YWx0dXJuLmNvbSJdfSwic2lnbl9pbl9wcm92aWRlciI6InBhc3N3b3JkIn19.O6U4VoFZ8JAYuoidffykmfBy995ziPXlq_jtcl1sSkOMqxtNDrfRt4NRnAYsASrNuITn2L_yb05xlW3yzUW01numdMvGvEeEKROi-8N0tLOyaPt4yzotfGMKEwKJBWPJcRvwTfvN5oe4a-AxJ8d0qfq50nC9x6wW0rzdA29ES_N8zkKaNrma9aELpDhaHC4vaJfIHmGperxD4RDIYHXBPd-BKevcXQwtOnImowO9eZam70kl5Xa9iSbHahDE8XOLivzTQ5-M8rqhK6TpXGWpBl1HqwVH9O2HjKhxIBD6riyFQGGbJqe0297Nzpm2HcLQ1kxzBavGjrv4aN2VMOWlMw',
+              'eyJhbGciOiJSUzI1NiIsImtpZCI6IjMwYjIyMWFiNjU2MTdiY2Y4N2VlMGY4NDYyZjc0ZTM2NTIyY2EyZTQiLCJ0eXAiOiJKV1QifQ.eyJuYW1lIjoiQWx2aW4gU2V0aWFkaSIsInBpY3R1cmUiOiJodHRwczovL2xoMy5nb29nbGV1c2VyY29udGVudC5jb20vYS9BQ2c4b2NJU1FRQk1wRmtpWk04RmtPejVUMmxrSTJ1eU0wRUcxUkp6U0c0NkRqLXF5ZHI1TFE9czk2LWMiLCJpc3MiOiJodHRwczovL3NlY3VyZXRva2VuLmdvb2dsZS5jb20vc3RldmUtZGV2LTQxZDAxIiwiYXVkIjoic3RldmUtZGV2LTQxZDAxIiwiYXV0aF90aW1lIjoxNzQyODA5NzEyLCJ1c2VyX2lkIjoiNjcxYjY5MWEyYTdkOGI4YjFlNzY2MzU3Iiwic3ViIjoiNjcxYjY5MWEyYTdkOGI4YjFlNzY2MzU3IiwiaWF0IjoxNzQyODA5NzEyLCJleHAiOjE3NDI4MTMzMTIsImVtYWlsIjoiYWx2aW5Ad2FsdHVybi5jb20iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiZmlyZWJhc2UiOnsiaWRlbnRpdGllcyI6eyJlbWFpbCI6WyJhbHZpbkB3YWx0dXJuLmNvbSJdfSwic2lnbl9pbl9wcm92aWRlciI6InBhc3N3b3JkIn19.MHbOTmxLdKtobr01W2jBDaNvK2qDYqnCxDTjw9aPxRun-rqds-UK3dlI67QqpKAIcFjFqomgjSK76D85sGKilIzOJf3MJHwkIwkm_F715OagaEU7yCJ4xUd3628_BX25wyorjSCfyy6lnCv2-M3PUVJdYEkSiQuSXzVQOqVTAR97M8SFu8SqQjYeXN7iv3ZfIqe6qE4rmPSejXWY3ImmP0o6MVXj3UZMGSX7DkG3fDAwzF23MWgd7DpuEVnlfvAJuXYs5Y-S_J7pQepHXgGkc7nlXVSV8ox5QgPXAQqEoJCDIrUMLW0GYvPi5lLH6vz0Y3IVxNtEdkyWNbjWCOtnLg',
         ),
       ),
     );

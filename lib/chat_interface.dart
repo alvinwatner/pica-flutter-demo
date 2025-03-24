@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:pica_oauth_client/authkit_dialog.dart';
 
 class ChatMessage {
   final String text;
@@ -43,11 +44,17 @@ class _ChatInterfaceState extends State<ChatInterface> {
   Map<String, dynamic>? _currentToolResult;
   bool _isStreaming = false;
 
+  // Add a variable to store the user message for resending after authentication
+  String _lastUserMessage = '';
+  // Add a timer for polling connection status
+  Timer? _connectionStatusTimer;
+
   // Buffer for accumulating SSE chunks
   String _bufferChunk = '';
 
   @override
   void dispose() {
+    _stopPollingConnectionStatus();
     _textController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -69,6 +76,9 @@ class _ChatInterfaceState extends State<ChatInterface> {
   Future<void> _sendMessage() async {
     final message = _textController.text.trim();
     if (message.isEmpty) return;
+
+    // Store the message for potential resending after authentication
+    _lastUserMessage = message;
 
     setState(() {
       _messages.add(ChatMessage(
@@ -208,6 +218,65 @@ class _ChatInterfaceState extends State<ChatInterface> {
       String data = line.substring(2);
 
       switch (eventType) {
+        case 'p': // Platform authentication URL
+          try {
+            final parsed = jsonDecode(data);
+            if (parsed.containsKey('data')) {
+              final authUrl = parsed['data'];
+              debugPrint('Received platform authentication URL: $authUrl');
+
+              // Extract connection ID from the URL
+              String? connectionId = _extractConnectionId(authUrl);
+
+              if (connectionId != null) {
+                debugPrint('Extracted connection ID: $connectionId');
+
+                // Open the AuthKit dialog with the auth URL
+                if (mounted) {
+                  showDialog(
+                    context: context,
+                    barrierDismissible:
+                        false, // Prevent dismissing by tapping outside
+                    builder: (dialogContext) {
+                      // Store the dialog context for later use
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        // Start polling with the dialog context after dialog is shown
+                        _startPollingConnectionStatus(
+                            connectionId, dialogContext);
+                      });
+
+                      return AuthKitDialog(
+                        previewUrl: authUrl,
+                        onAuthSuccess: (authData) {
+                          debugPrint(
+                              "Auth Success callback received: $authData");
+                          // We don't need to do anything here as we'll poll the status endpoint
+                        },
+                        onClose: () {
+                          // Just stop polling when dialog is closed
+                          _stopPollingConnectionStatus();
+                          debugPrint('Auth dialog closed by user');
+                        },
+                      );
+                    },
+                  );
+                }
+
+                // Mark streaming as complete since we're handling auth separately
+                setState(() {
+                  _isStreaming = false;
+                  _isLoading = false;
+                });
+              } else {
+                debugPrint(
+                    'Could not extract connection ID from URL: $authUrl');
+              }
+            }
+          } catch (e) {
+            debugPrint('Error parsing platform authentication URL: $e');
+          }
+          break;
+
         case 'f': // Message ID
           try {
             final parsed = jsonDecode(data);
@@ -416,7 +485,7 @@ class _ChatInterfaceState extends State<ChatInterface> {
     return completer.future;
   }
 
-// Better tool result display
+  // Better tool result display
   Widget _buildToolResultDisplay(Map<String, dynamic>? toolResult) {
     if (toolResult == null) return Container();
 
@@ -456,7 +525,7 @@ class _ChatInterfaceState extends State<ChatInterface> {
     );
   }
 
-// Improved tool result handling
+  // Improved tool result handling
   Future<void> _updateToolResult(Map<String, dynamic> toolResult) async {
     // Use a Completer to make this function awaitable
     final completer = Completer<void>();
@@ -536,6 +605,166 @@ class _ChatInterfaceState extends State<ChatInterface> {
     _scrollToBottom();
 
     return completer.future;
+  }
+
+  // Extract connection ID from the auth URL
+  String? _extractConnectionId(String authUrl) {
+    try {
+      Uri uri = Uri.parse(authUrl);
+      String? connectionId = uri.queryParameters['connection-id'];
+      return connectionId;
+    } catch (e) {
+      debugPrint('Error extracting connection ID: $e');
+      return null;
+    }
+  }
+
+  // Start polling for connection status
+  void _startPollingConnectionStatus(
+      String connectionId, BuildContext dialogContext) {
+    // Cancel any existing timer
+    _stopPollingConnectionStatus();
+
+    debugPrint('Starting to poll connection status for ID: $connectionId');
+
+    // Start a new timer to poll every 2 seconds
+    _connectionStatusTimer =
+        Timer.periodic(const Duration(seconds: 2), (timer) async {
+      try {
+        // Check if the dialog context is still valid
+        if (!dialogContext.mounted) {
+          debugPrint('Dialog context is no longer valid, stopping polling');
+          _stopPollingConnectionStatus();
+          return;
+        }
+
+        final response = await http.get(
+          Uri.parse(
+              'http://127.0.0.1:8000/hey-steve/connection-status?connection_id=$connectionId'),
+          headers: {
+            'Authorization': 'Bearer ${widget.authToken}',
+          },
+        );
+
+        if (response.statusCode == 200) {
+          final data = jsonDecode(response.body);
+          final status = data['status'];
+          debugPrint('Connection status: $status');
+
+          switch (status) {
+            case 'success':
+              // Stop polling
+              _stopPollingConnectionStatus();
+
+              // Close the dialog safely
+              if (dialogContext.mounted) {
+                Navigator.of(dialogContext).pop();
+                debugPrint('Dialog closed after successful connection');
+              }
+
+              // Add success message
+              setState(() {
+                _messages.add(ChatMessage(
+                  text: "✅ Successfully connected to platform",
+                  isUser: false,
+                ));
+              });
+
+              // Resend the last user message
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                _textController.text = _lastUserMessage;
+                _sendMessage();
+              });
+              break;
+
+            case 'error':
+              // Stop polling
+              _stopPollingConnectionStatus();
+
+              // Close the dialog safely
+              if (dialogContext.mounted) {
+                Navigator.of(dialogContext).pop();
+                debugPrint('Dialog closed after connection error');
+              }
+
+              // Show error message
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content:
+                      Text('Error connecting to platform. Please try again.'),
+                  backgroundColor: Colors.red,
+                ),
+              );
+
+              // Reopen the dialog after a short delay
+              Future.delayed(const Duration(seconds: 1), () {
+                if (!mounted) return; // Check if widget is still mounted
+
+                showDialog(
+                  context: context,
+                  barrierDismissible: false,
+                  builder: (newDialogContext) {
+                    // Store the dialog context for later use
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      // Start polling with the new dialog context after dialog is shown
+                      _startPollingConnectionStatus(
+                          connectionId, newDialogContext);
+                    });
+
+                    return AuthKitDialog(
+                      previewUrl: Uri.parse(
+                              'http://127.0.0.1:8000/hey-steve/reconnect?connection_id=$connectionId')
+                          .toString(),
+                      onAuthSuccess: (authData) {
+                        // We don't need to do anything here as we'll poll the status endpoint
+                        debugPrint('Auth dialog reopened after error');
+                      },
+                      onClose: () {
+                        // Just stop polling when dialog is closed
+                        _stopPollingConnectionStatus();
+                      },
+                    );
+                  },
+                );
+              });
+              break;
+
+            case 'close':
+              // Stop polling
+              _stopPollingConnectionStatus();
+
+              // Close the dialog safely
+              if (dialogContext.mounted) {
+                Navigator.of(dialogContext).pop();
+                debugPrint('Dialog closed after connection closed');
+              }
+              break;
+
+            case 'waiting':
+              // Continue polling
+              debugPrint('Still waiting for connection...');
+              break;
+
+            default:
+              debugPrint('Unknown connection status: $status');
+              break;
+          }
+        } else {
+          debugPrint(
+              'Error checking connection status: ${response.statusCode}');
+        }
+      } catch (e) {
+        debugPrint('Error polling connection status: $e');
+      }
+    });
+  }
+
+  // Stop polling for connection status
+  void _stopPollingConnectionStatus() {
+    // Don't call Navigator.pop() here - let the specific handlers do it with the right context
+    _connectionStatusTimer?.cancel();
+    _connectionStatusTimer = null;
+    debugPrint('Connection status polling stopped');
   }
 
   @override
