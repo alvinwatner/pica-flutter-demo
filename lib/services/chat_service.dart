@@ -1,59 +1,45 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
-import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 
 class ChatService {
   final String baseUrl = 'http://127.0.0.1:8000';
-  late final Dio _dio;
-
-  ChatService() {
-    _dio = Dio(BaseOptions(
-      baseUrl: baseUrl,
-      responseType: ResponseType.stream,
-    ));
-  }
 
   /// Sends a message to the chat API and returns a stream of responses
   Stream<Map<String, dynamic>> sendMessage({
     required String message,
     required String authToken,
   }) async* {
+    final request = http.Request(
+      'POST',
+      Uri.parse('$baseUrl/hey-steve/chat/pica-stream'),
+    );
+
+    request.headers.addAll({
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer $authToken',
+    });
+
+    request.body = jsonEncode({"message": message});
+
+    debugPrint('Sending request to: ${request.url}');
+    debugPrint('Request body: ${request.body}');
+
+    final client = http.Client();
     try {
-      final response = await _dio.post<ResponseBody>(
-        '/hey-steve/chat/pica-stream',
-        data: {'message': message},
-        options: Options(
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer $authToken',
-            'Accept': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-          },
-          responseType: ResponseType.stream,
-        ),
-      );
+      final response = await client.send(request);
 
-      debugPrint('Sending request to: ${response.requestOptions.uri}');
-      debugPrint('Request body: ${response.requestOptions.data}');
+      if (response.statusCode != 200) {
+        final errorBody = await response.stream.bytesToString();
+        throw Exception(
+            'Failed to send message: ${response.statusCode} - $errorBody');
+      }
 
-      // Transform Uint8List to List<int>
-      final uint8Transformer =
-          StreamTransformer<Uint8List, List<int>>.fromHandlers(
-        handleData: (data, sink) {
-          sink.add(List<int>.from(data));
-        },
-      );
-
-      // Get the response stream and transform it
-      final responseStream = response.data!.stream
-          .transform(uint8Transformer)
-          .transform(utf8.decoder);
-
+      final stream = response.stream.transform(utf8.decoder);
       String bufferChunk = '';
 
-      await for (var chunk in responseStream) {
+      await for (var chunk in stream) {
         debugPrint('Received chunk: $chunk');
 
         // Append chunk to buffer
@@ -212,14 +198,8 @@ class ChatService {
           bufferChunk = '';
         }
       }
-    } on DioException catch (e) {
-      debugPrint('Dio error: ${e.message}');
-      if (e.response != null) {
-        throw Exception(
-            'Failed to send message: ${e.response?.statusCode} - ${e.response?.data}');
-      } else {
-        throw Exception('Failed to send message: ${e.message}');
-      }
+    } finally {
+      client.close();
     }
   }
 
@@ -239,29 +219,24 @@ class ChatService {
     required String connectionId,
     required String authToken,
   }) async {
-    try {
-      final response = await _dio.get(
-        '/hey-steve/connection-status',
-        queryParameters: {'connection_id': connectionId},
-        options: Options(
-          headers: {'Authorization': 'Bearer $authToken'},
-          responseType: ResponseType.json,
-        ),
-      );
-      return response.data;
-    } on DioException catch (e) {
-      debugPrint('Dio error checking connection status: ${e.message}');
+    final response = await http.get(
+      Uri.parse(
+          '$baseUrl/hey-steve/connection-status?connection_id=$connectionId'),
+      headers: {
+        'Authorization': 'Bearer $authToken',
+      },
+    );
+
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body);
+    } else {
       throw Exception(
-          'Failed to check connection status: ${e.response?.statusCode ?? e.message}');
+          'Failed to check connection status: ${response.statusCode}');
     }
   }
 
   /// Returns the reconnect URL for a connection
   String getReconnectUrl(String connectionId) {
     return '$baseUrl/hey-steve/reconnect?connection_id=$connectionId';
-  }
-
-  void dispose() {
-    _dio.close();
   }
 }
