@@ -4,7 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 class ChatService {
-  final String baseUrl = 'http://127.0.0.1:8000';
+  final String baseUrl = 'https://api.steve-dev.walturn.com';
 
   /// Sends a message to the chat API and returns a stream of responses
   Stream<Map<String, dynamic>> sendMessage({
